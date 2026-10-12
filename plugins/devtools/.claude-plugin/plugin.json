@@ -1,0 +1,8 @@
+{
+  "name": "devtools",
+  "description": "开发工具箱:通用开发 skill 集合,现含线上错误查询与处理(prod-errors)、本地 .env 与中心台账同步(env-sync)",
+  "author": {
+    "name": "Duoke Dev"
+  },
+  "repository": "https://github.com/duoke-dev/claude-plugins"
+}
