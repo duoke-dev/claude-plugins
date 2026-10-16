@@ -35,7 +35,7 @@ claude plugin install devtools@duoke-dev --scope project
 | skill | 用途 | 需要 |
 |---|---|---|
 | `prod-errors` | 在 Claude Code 里查询线上错误、看 stacktrace 定位、修复后标记解决 | 配套的错误追踪服务端;项目 `.env` 里的 `DEVTOOLS_API_BASE` 与 `DEVTOOLS_TOKEN` |
-| `env-sync` | 把本地 `.env` 与服务端台账对一遍:只补不改、系统键永不写入、值不进 AI 上下文;「本地」环境走双向镜像 | 配套服务端签发的一次性拉取票(随服务端生成的提示词给出);镜像模式还要求项目 `vendor/` 里有 `vlucas/phpdotenv` |
+| `env-sync` | 把本地 `.env` 与服务端台账对一遍:只补不改、系统键永不写入(仅项目级 SSO 登录凭据三键例外:可补不可改、要点名)、值不进 AI 上下文;「本地」环境走双向镜像 | 配套服务端签发的一次性拉取票(随服务端生成的提示词给出);镜像模式还要求项目 `vendor/` 里有 `vlucas/phpdotenv` |
 
 没有配套服务端时,这些 skill 装上也用不起来。
 

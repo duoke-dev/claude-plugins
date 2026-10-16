@@ -43,6 +43,13 @@ const LOCAL_ENV_SLUG_PATTERN = '/\A[A-Za-z0-9][A-Za-z0-9._-]{0,99}\z/';
 /** 停用行(# KEY=)扫描正则:井号后允许空白、允许 export 前缀,只认未加引号的键名(常见形态)。 */
 const LOCAL_ENV_DISABLED_LINE_PATTERN = '/^\s*#\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=/';
 
+/**
+ * SSO 三键(中心只对它们开放**下行**,与中心「本地可下行写入的系统键」清单同源;
+ * 中心侧有守卫用例钉住两边一致)。本地活行里这三个键**值为空**(从 .env.example 复制出来的空占位)视为「缺失」,
+ * 见 local_env_blank_sso_keys()。
+ */
+const LOCAL_ENV_SSO_KEYS = ['SSO_BASE_URL', 'SSO_CLIENT_ID', 'SSO_CLIENT_SECRET'];
+
 // ============================================================
 // 解析:文件 → 结构化清单(fail-closed,永不泄值)
 // ============================================================
@@ -339,13 +346,46 @@ function local_env_read_json(string $path): mixed
 // ============================================================
 
 /**
+ * 本地活行里「值为空(或纯空白)」的 SSO 三键。
+ *
+ * .env 常是从 .env.example 复制来的,里面预置了 `SSO_CLIENT_ID=` / `SSO_CLIENT_SECRET=` 这样的**空占位**——
+ * 它们对登录没有任何作用,等同没有。所以这三个键(仅这三个,普通键的空值照旧是合法值)的空占位视为「缺失」:
+ * 构造 plan 请求时不上报它的指纹,中心于是把它归为 downlink 的 center_only(缺失,点名选 center 即可补入),
+ * 而不是算出 sha256('') 落成一条「值不同」的 differ。写盘时仍是**原位替换那一行**(parsed['active'] 里照样有它的区间),
+ * 不会追加出第二行同名键。非空的本地值不在此列:照旧「可补不可改」。
+ *
+ * 判空口径是 phpdotenv 解析后的值 trim 为空:`KEY=`、`KEY=""`、`KEY=''`、`KEY=   `、`KEY="   "` 都算。
+ * 放在脚本侧而不是让中心从指纹里猜:指纹是无盐 sha256,中心只认得出恰好空串,认不出纯空白;
+ * 脚本手里有明文,判得准,且不引入任何协议变化(老版脚本 / 老版服务端互相照常工作)。
+ *
+ * @return list<string> 键名(只有键名,不含值)
+ */
+function local_env_blank_sso_keys(array $parsed): array
+{
+    $blank = [];
+
+    foreach (LOCAL_ENV_SSO_KEYS as $key) {
+        if (isset($parsed['active'][$key]) && trim($parsed['active'][$key]['value']) === '') {
+            $blank[] = $key;
+        }
+    }
+
+    return $blank;
+}
+
+/**
  * @return array{keys: array<string, string>, disabled: list<string>}
  */
 function local_env_build_plan_request(array $parsed): array
 {
     $keys = [];
+    $blankSso = array_flip(local_env_blank_sso_keys($parsed));
 
     foreach ($parsed['active'] as $key => $entry) {
+        if (isset($blankSso[$key])) {
+            continue; // SSO 空占位按缺失处理,不上报(见 local_env_blank_sso_keys)
+        }
+
         $keys[$key] = hash('sha256', $entry['value']);
     }
 
@@ -361,6 +401,8 @@ function local_env_build_plan_request(array $parsed): array
  *  differ      ∈ {local, center}
  *  local_only  ∈ {local, disable}
  *  center_only ∈ {center, local}
+ *  downlink    ∈ {center, skip}   (2026-10-15 起:SSO 三键,只下行——没有 local,即**永远不会**为它生成 set / delete 上行 op;
+ *                                  state=same 的无需决策、不生成 op;skip = 本地不动、中心也不动)
  *
  * @return array{ops: list<array{key: string, op: string, value?: string}>, errors: list<string>}
  */
@@ -373,6 +415,7 @@ function local_env_build_apply_ops(array $planResponse, array $decisions, array 
     $differ = $data['differ'] ?? [];
     $localOnly = array_keys($data['local_only'] ?? []);
     $centerOnly = array_keys($data['center_only'] ?? []);
+    $downlink = $data['downlink'] ?? [];
 
     foreach ($differ as $key) {
         $decision = $decisions[$key] ?? null;
@@ -429,7 +472,51 @@ function local_env_build_apply_ops(array $planResponse, array $decisions, array 
             : ['key' => $key, 'op' => 'delete'];
     }
 
+    // downlink(SSO 三键):只下行。center → pull;skip → 不生成 op;其余取值一律报错——
+    // 尤其不接受 local / disable:那会是对系统键的上行 set / delete,中心 apply 本就一律 422,脚本这一侧先把门关上。
+    // 报错文案区分「没表态」与「表了不合法的态」:前者去问人,后者是 decisions.json 写错了。
+    foreach (local_env_downlink_pending($downlink) as $key) {
+        $decision = $decisions[$key] ?? null;
+
+        if ($decision === null) {
+            $errors[] = "{$key}: downlink 类还没有决策,请向人确认选 center(本地写入)还是 skip(本地不动)";
+
+            continue;
+        }
+
+        if (! in_array($decision, ['center', 'skip'], true)) {
+            $errors[] = "{$key}: downlink 类只能选 center(本地写入)或 skip(本地不动),不接受 local / disable(SSO 键只下行、没有上行)";
+
+            continue;
+        }
+
+        if ($decision === 'center') {
+            $ops[] = ['key' => $key, 'op' => 'pull'];
+        }
+    }
+
     return ['ops' => $ops, 'errors' => $errors];
+}
+
+/**
+ * plan 响应里 downlink 分类中**需要人表态**的键名(state 为 center_only / differ;same 一律忽略)。
+ *
+ * downlink 为空时服务端序列化成 `[]`,非空时是对象——foreach 两种都认。老版服务端没有这个字段时 `?? []` 进来即空。
+ *
+ * @param  array<string, array{state?: string}>|list<never>  $downlink
+ * @return list<string>
+ */
+function local_env_downlink_pending(array $downlink): array
+{
+    $pending = [];
+
+    foreach ($downlink as $key => $info) {
+        if (in_array($info['state'] ?? null, ['center_only', 'differ'], true)) {
+            $pending[] = (string) $key;
+        }
+    }
+
+    return $pending;
 }
 
 // ============================================================
@@ -437,6 +524,9 @@ function local_env_build_apply_ops(array $planResponse, array $decisions, array 
 // ============================================================
 
 /**
+ * skipped 的 reason 有两种:`skipped-interpolated`(本地原值含 `${VAR}` 引用,默认不展平)与
+ * `skipped-blank-downlink`(downlink 键的 apply 响应值为空 / 纯空白——纵深防线,绝不拿空值覆盖本地可用的凭据)。
+ *
  * @return array{changes: list<array{key: string, action: string}>, skipped: list<array{key: string, reason: string}>, content: string}
  */
 function local_env_apply_writes(array $parsed, array $planResponse, array $decisions, array $applyResponse): array
@@ -448,14 +538,16 @@ function local_env_apply_writes(array $parsed, array $planResponse, array $decis
     $differ = $data['differ'] ?? [];
     $localOnly = array_keys($data['local_only'] ?? []);
     $centerOnly = array_keys($data['center_only'] ?? []);
+    $downlinkPending = local_env_downlink_pending($data['downlink'] ?? []);
 
     $changes = [];
     $skipped = [];
 
-    // 先处理「pull 到值」的键(differ→center、center_only→center),按行号从大到小替换,
-    // 避免前面的替换改变了后面区间的行号。
+    // 先处理「pull 到值」的键(differ→center、center_only→center、downlink→center),按行号从大到小替换,
+    // 避免前面的替换改变了后面区间的行号。downlink(SSO 三键)与其它 center 决策走同一条写盘路径:
+    // 活行原位替换(含 interpolated 的跳过规则)、停用行复活、完全没有则追加到 managed 区块。
     $pullTargets = [];
-    foreach ([...$differ, ...$centerOnly] as $key) {
+    foreach ([...$differ, ...$centerOnly, ...$downlinkPending] as $key) {
         if (($decisions[$key] ?? null) === 'center' && array_key_exists($key, $pulled)) {
             $pullTargets[] = $key;
         }
@@ -466,6 +558,14 @@ function local_env_apply_writes(array $parsed, array $planResponse, array $decis
 
     foreach ($pullTargets as $key) {
         $value = (string) $pulled[$key];
+
+        // 纵深:downlink 键(SSO 三键)中心此刻拿不出值(校验到执行之间接入被解除之类)时,服务端会直接拒绝;
+        // 万一响应里仍带着空 / 纯空白的值,绝不能把本地可用的凭据覆盖成空占位——跳过并告警(只写键名,不写值)。
+        if (in_array($key, $downlinkPending, true) && trim($value) === '') {
+            $skipped[] = ['key' => $key, 'reason' => 'skipped-blank-downlink'];
+
+            continue;
+        }
 
         if (isset($parsed['active'][$key])) {
             $entry = $parsed['active'][$key];
@@ -666,6 +766,11 @@ function local_env_cmd_plan_payload(array $args): int
         echo 'novalue(无等号裸键,已跳过):'.implode(' ', $parsed['novalue'])."\n";
     }
 
+    $blankSso = local_env_blank_sso_keys($parsed);
+    if ($blankSso !== []) {
+        echo 'blank-sso(SSO 键本地值为空,按缺失处理、未上报,补入时原位替换该行):'.implode(' ', $blankSso)."\n";
+    }
+
     $interpolated = [];
     foreach ($parsed['active'] as $key => $entry) {
         if ($entry['interpolated']) {
@@ -780,7 +885,10 @@ function local_env_cmd_write(array $args): int
         echo "{$change['key']}: {$change['action']}\n";
     }
     foreach ($result['skipped'] as $skip) {
-        echo "{$skip['key']}: {$skip['reason']}(未写盘,原值 \${...} 引用会被展平,需人工处理)\n";
+        $why = $skip['reason'] === 'skipped-blank-downlink'
+            ? '未写盘,中心此刻没有给出这个键的值,本地原值保持不动,请回中心核对 SSO 接入后重新同步'
+            : '未写盘,原值 ${...} 引用会被展平,需人工处理';
+        echo "{$skip['key']}: {$skip['reason']}({$why})\n";
     }
 
     if ($result['changes'] === []) {

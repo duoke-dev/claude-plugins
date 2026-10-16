@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "devtools",
-      "description": "开发工具箱:通用开发 skill 集合,现含线上错误查询与处理(prod-errors)与本地 .env 同步(env-sync)。需配合对应的服务端使用:启用后可在 Claude Code 里直接查询、定位、标记解决线上报错;还能把本地 .env 与中心台账对一遍(只补不改,系统键永不写入)。后续新工具 skill 随市场自动更新。",
+      "description": "开发工具箱:通用开发 skill 集合,现含线上错误查询与处理(prod-errors)与本地 .env 同步(env-sync)。需配合对应的服务端使用:启用后可在 Claude Code 里直接查询、定位、标记解决线上报错;还能把本地 .env 与中心台账对一遍(只补不改,系统键永不写入,仅项目级 SSO 登录凭据三键例外:可补不可改、要点名)。后续新工具 skill 随市场自动更新。",
       "author": {
         "name": "Duoke Dev"
       },
